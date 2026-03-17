@@ -105,6 +105,12 @@ Here's what you can ask Claude to do once you've set up this integration:
 | `get_campaign_performance`      | Shows campaign metrics with performance data                | Your account ID and time period                                 |
 | `get_ad_performance`            | Detailed analysis of your ad creative performance           | Your account ID and time period                                 |
 | `run_gaql`                      | Runs any arbitrary GAQL query with formatting options       | Your account ID, query, and format (table, JSON, or CSV)        |
+| `mutate_google_ads`             | Executes arbitrary Google Ads mutate operations             | Your account ID + mutate operations JSON                         |
+| `set_campaign_status`           | Enables, pauses, or removes a campaign                      | Your account ID, campaign ID, and status                         |
+| `set_ad_group_status`           | Enables, pauses, or removes an ad group                     | Your account ID, ad group ID, and status                         |
+| `add_keywords`                  | Adds positive keywords to an ad group                       | Your account ID, ad group ID, keywords, and match type           |
+| `add_negative_keywords`         | Adds negative keywords at campaign or ad-group level        | Your account ID, target campaign/ad group, keywords, match type  |
+| `remove_criteria`               | Removes campaign/ad-group criteria (incl. negative keywords)| Your account ID, scope, and criterion resource names             |
 
 ### Using the Advanced Query Tools
 
@@ -144,6 +150,16 @@ ORDER BY metrics.impressions DESC
 ```
 
 *For a complete list of all available tools and their detailed descriptions, ask Claude to "list tools" after setup.*
+
+### Managing Campaigns (Write Operations)
+
+The server now supports write operations through `mutate_google_ads` and helper tools.
+
+Safety recommendations:
+
+1. Start with `validate_only=true` to verify operations.
+2. Use `partial_failure=true` for batch operations when appropriate.
+3. Use `run_gaql` to verify post-change state.
 
 ---
 

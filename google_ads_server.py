@@ -243,6 +243,66 @@ def get_headers(creds):
     
     return headers
 
+def get_headers_with_login_customer_override(creds, login_customer_id: Optional[str] = None):
+    """
+    Build request headers with optional login-customer-id override.
+    Pass an empty string to explicitly remove the login-customer-id header.
+    """
+    headers = get_headers(creds).copy()
+
+    if login_customer_id is None:
+        return headers
+
+    headers.pop('login-customer-id', None)
+    normalized = str(login_customer_id).strip()
+    if normalized:
+        headers['login-customer-id'] = format_customer_id(normalized)
+
+    return headers
+
+def parse_json_string(value: str, field_name: str) -> Any:
+    """Parse JSON from a string field and raise a readable ValueError on failure."""
+    try:
+        return json.loads(value)
+    except json.JSONDecodeError as e:
+        raise ValueError(f"{field_name} must be valid JSON: {str(e)}")
+
+def normalize_enum(value: str, allowed: List[str], field_name: str) -> str:
+    """Normalize enum-like user input and validate against allowed values."""
+    normalized = str(value).strip().upper()
+    if normalized not in allowed:
+        raise ValueError(f"{field_name} must be one of: {', '.join(allowed)}")
+    return normalized
+
+def post_mutate_request(
+    customer_id: str,
+    mutate_operations: List[Dict[str, Any]],
+    validate_only: bool = False,
+    partial_failure: bool = False,
+    response_content_type: str = "MUTABLE_RESOURCE",
+    login_customer_id: Optional[str] = None
+) -> str:
+    """Execute a Google Ads mutate request and return formatted JSON or error string."""
+    creds = get_credentials()
+    headers = get_headers_with_login_customer_override(creds, login_customer_id)
+
+    formatted_customer_id = format_customer_id(customer_id)
+    url = f"https://googleads.googleapis.com/{API_VERSION}/customers/{formatted_customer_id}/googleAds:mutate"
+
+    payload = {
+        "mutateOperations": mutate_operations,
+        "partialFailure": partial_failure,
+        "validateOnly": validate_only,
+        "responseContentType": response_content_type
+    }
+
+    response = requests.post(url, headers=headers, json=payload)
+    if response.status_code != 200:
+        return f"Error executing mutate request: {response.text}"
+
+    result = response.json()
+    return json.dumps(result, indent=2)
+
 @mcp.tool()
 async def list_accounts() -> str:
     """
@@ -452,7 +512,11 @@ async def get_ad_performance(
 async def run_gaql(
     customer_id: str = Field(description="Google Ads customer ID (10 digits, no dashes). Example: '9873186703'"),
     query: str = Field(description="Valid GAQL query string following Google Ads Query Language syntax"),
-    format: str = Field(default="table", description="Output format: 'table', 'json', or 'csv'")
+    format: str = Field(default="table", description="Output format: 'table', 'json', or 'csv'"),
+    login_customer_id: Optional[str] = Field(
+        default=None,
+        description="Optional login customer ID override. Use empty string to disable the login-customer-id header."
+    )
 ) -> str:
     """
     Execute any arbitrary GAQL (Google Ads Query Language) query with custom formatting options.
@@ -510,7 +574,7 @@ async def run_gaql(
     """
     try:
         creds = get_credentials()
-        headers = get_headers(creds)
+        headers = get_headers_with_login_customer_override(creds, login_customer_id)
         
         formatted_customer_id = format_customer_id(customer_id)
         url = f"https://googleads.googleapis.com/{API_VERSION}/customers/{formatted_customer_id}/googleAds:search"
@@ -604,6 +668,342 @@ async def run_gaql(
     
     except Exception as e:
         return f"Error executing GAQL query: {str(e)}"
+
+@mcp.tool()
+async def mutate_google_ads(
+    customer_id: str = Field(description="Google Ads customer ID (10 digits, no dashes). Example: '9873186703'"),
+    operations_json: str = Field(
+        description="JSON array of mutate operations, or object containing mutateOperations. Follows googleAds:mutate schema."
+    ),
+    validate_only: bool = Field(default=False, description="When true, validates operations without applying changes."),
+    partial_failure: bool = Field(default=False, description="When true, valid operations can succeed even if some fail."),
+    response_content_type: str = Field(
+        default="MUTABLE_RESOURCE",
+        description="Response content type: 'MUTABLE_RESOURCE' or 'RESOURCE_NAME_ONLY'."
+    ),
+    login_customer_id: Optional[str] = Field(
+        default=None,
+        description="Optional login customer ID override. Use empty string to disable the login-customer-id header."
+    )
+) -> str:
+    """
+    Execute arbitrary mutate operations using GoogleAdsService Mutate.
+
+    This is the primary write tool for full campaign management. It can create, update,
+    and remove many resource types by sending mutateOperations directly.
+    """
+    try:
+        parsed = parse_json_string(operations_json, "operations_json")
+
+        if isinstance(parsed, list):
+            mutate_operations = parsed
+        elif isinstance(parsed, dict):
+            mutate_operations = parsed.get("mutateOperations") or parsed.get("operations")
+        else:
+            mutate_operations = None
+
+        if not isinstance(mutate_operations, list) or not mutate_operations:
+            return "Error: operations_json must be a non-empty JSON array or object with 'mutateOperations'."
+
+        normalized_response_type = normalize_enum(
+            response_content_type,
+            ["MUTABLE_RESOURCE", "RESOURCE_NAME_ONLY"],
+            "response_content_type"
+        )
+
+        return post_mutate_request(
+            customer_id=customer_id,
+            mutate_operations=mutate_operations,
+            validate_only=validate_only,
+            partial_failure=partial_failure,
+            response_content_type=normalized_response_type,
+            login_customer_id=login_customer_id
+        )
+    except Exception as e:
+        return f"Error executing mutate_google_ads: {str(e)}"
+
+@mcp.tool()
+async def set_campaign_status(
+    customer_id: str = Field(description="Google Ads customer ID (10 digits, no dashes)."),
+    campaign_id: str = Field(description="Campaign ID."),
+    status: str = Field(description="Desired campaign status: ENABLED, PAUSED, or REMOVED."),
+    validate_only: bool = Field(default=False, description="When true, validates the update without applying it."),
+    login_customer_id: Optional[str] = Field(
+        default=None,
+        description="Optional login customer ID override. Use empty string to disable the login-customer-id header."
+    )
+) -> str:
+    """Update a campaign's serving status."""
+    try:
+        normalized_status = normalize_enum(status, ["ENABLED", "PAUSED", "REMOVED"], "status")
+        formatted_customer_id = format_customer_id(customer_id)
+        campaign_id_digits = ''.join(ch for ch in str(campaign_id) if ch.isdigit())
+        if not campaign_id_digits:
+            return "Error: campaign_id must contain digits."
+
+        operation = {
+            "campaignOperation": {
+                "update": {
+                    "resourceName": f"customers/{formatted_customer_id}/campaigns/{campaign_id_digits}",
+                    "status": normalized_status
+                },
+                "updateMask": "status"
+            }
+        }
+
+        return post_mutate_request(
+            customer_id=customer_id,
+            mutate_operations=[operation],
+            validate_only=validate_only,
+            partial_failure=False,
+            response_content_type="MUTABLE_RESOURCE",
+            login_customer_id=login_customer_id
+        )
+    except Exception as e:
+        return f"Error updating campaign status: {str(e)}"
+
+@mcp.tool()
+async def set_ad_group_status(
+    customer_id: str = Field(description="Google Ads customer ID (10 digits, no dashes)."),
+    ad_group_id: str = Field(description="Ad group ID."),
+    status: str = Field(description="Desired ad group status: ENABLED, PAUSED, or REMOVED."),
+    validate_only: bool = Field(default=False, description="When true, validates the update without applying it."),
+    login_customer_id: Optional[str] = Field(
+        default=None,
+        description="Optional login customer ID override. Use empty string to disable the login-customer-id header."
+    )
+) -> str:
+    """Update an ad group's serving status."""
+    try:
+        normalized_status = normalize_enum(status, ["ENABLED", "PAUSED", "REMOVED"], "status")
+        formatted_customer_id = format_customer_id(customer_id)
+        ad_group_id_digits = ''.join(ch for ch in str(ad_group_id) if ch.isdigit())
+        if not ad_group_id_digits:
+            return "Error: ad_group_id must contain digits."
+
+        operation = {
+            "adGroupOperation": {
+                "update": {
+                    "resourceName": f"customers/{formatted_customer_id}/adGroups/{ad_group_id_digits}",
+                    "status": normalized_status
+                },
+                "updateMask": "status"
+            }
+        }
+
+        return post_mutate_request(
+            customer_id=customer_id,
+            mutate_operations=[operation],
+            validate_only=validate_only,
+            partial_failure=False,
+            response_content_type="MUTABLE_RESOURCE",
+            login_customer_id=login_customer_id
+        )
+    except Exception as e:
+        return f"Error updating ad group status: {str(e)}"
+
+@mcp.tool()
+async def add_keywords(
+    customer_id: str = Field(description="Google Ads customer ID (10 digits, no dashes)."),
+    ad_group_id: str = Field(description="Target ad group ID."),
+    keywords: List[str] = Field(description="List of keyword texts to add."),
+    match_type: str = Field(default="BROAD", description="Keyword match type: BROAD, PHRASE, or EXACT."),
+    status: str = Field(default="ENABLED", description="Keyword criterion status: ENABLED or PAUSED."),
+    cpc_bid_micros: Optional[int] = Field(default=None, description="Optional CPC bid in micros for manual CPC setups."),
+    validate_only: bool = Field(default=False, description="When true, validates operations without applying changes."),
+    partial_failure: bool = Field(default=True, description="When true, valid operations can succeed even if some fail."),
+    login_customer_id: Optional[str] = Field(
+        default=None,
+        description="Optional login customer ID override. Use empty string to disable the login-customer-id header."
+    )
+) -> str:
+    """Add one or more positive keywords to an ad group."""
+    try:
+        if not keywords:
+            return "Error: keywords must contain at least one keyword."
+
+        normalized_match_type = normalize_enum(match_type, ["BROAD", "PHRASE", "EXACT"], "match_type")
+        normalized_status = normalize_enum(status, ["ENABLED", "PAUSED"], "status")
+        formatted_customer_id = format_customer_id(customer_id)
+        ad_group_id_digits = ''.join(ch for ch in str(ad_group_id) if ch.isdigit())
+        if not ad_group_id_digits:
+            return "Error: ad_group_id must contain digits."
+
+        ad_group_resource = f"customers/{formatted_customer_id}/adGroups/{ad_group_id_digits}"
+        operations = []
+
+        for keyword_text in keywords:
+            cleaned_text = str(keyword_text).strip()
+            if not cleaned_text:
+                continue
+
+            create_payload: Dict[str, Any] = {
+                "adGroup": ad_group_resource,
+                "status": normalized_status,
+                "keyword": {
+                    "text": cleaned_text,
+                    "matchType": normalized_match_type
+                }
+            }
+
+            if cpc_bid_micros is not None:
+                create_payload["cpcBidMicros"] = int(cpc_bid_micros)
+
+            operations.append({
+                "adGroupCriterionOperation": {
+                    "create": create_payload
+                }
+            })
+
+        if not operations:
+            return "Error: no non-empty keyword text values were provided."
+
+        return post_mutate_request(
+            customer_id=customer_id,
+            mutate_operations=operations,
+            validate_only=validate_only,
+            partial_failure=partial_failure,
+            response_content_type="MUTABLE_RESOURCE",
+            login_customer_id=login_customer_id
+        )
+    except Exception as e:
+        return f"Error adding keywords: {str(e)}"
+
+@mcp.tool()
+async def add_negative_keywords(
+    customer_id: str = Field(description="Google Ads customer ID (10 digits, no dashes)."),
+    keywords: List[str] = Field(description="List of negative keyword texts to add."),
+    match_type: str = Field(default="BROAD", description="Keyword match type: BROAD, PHRASE, or EXACT."),
+    campaign_id: Optional[str] = Field(default=None, description="Campaign ID for campaign-level negative keywords."),
+    ad_group_id: Optional[str] = Field(default=None, description="Ad group ID for ad-group-level negative keywords."),
+    validate_only: bool = Field(default=False, description="When true, validates operations without applying changes."),
+    partial_failure: bool = Field(default=True, description="When true, valid operations can succeed even if some fail."),
+    login_customer_id: Optional[str] = Field(
+        default=None,
+        description="Optional login customer ID override. Use empty string to disable the login-customer-id header."
+    )
+) -> str:
+    """
+    Add negative keywords at campaign or ad-group scope.
+
+    Exactly one of campaign_id or ad_group_id must be provided.
+    """
+    try:
+        if not keywords:
+            return "Error: keywords must contain at least one keyword."
+
+        if bool(campaign_id) == bool(ad_group_id):
+            return "Error: provide exactly one of campaign_id or ad_group_id."
+
+        normalized_match_type = normalize_enum(match_type, ["BROAD", "PHRASE", "EXACT"], "match_type")
+        formatted_customer_id = format_customer_id(customer_id)
+        operations = []
+
+        if campaign_id:
+            campaign_id_digits = ''.join(ch for ch in str(campaign_id) if ch.isdigit())
+            if not campaign_id_digits:
+                return "Error: campaign_id must contain digits."
+            campaign_resource = f"customers/{formatted_customer_id}/campaigns/{campaign_id_digits}"
+
+            for keyword_text in keywords:
+                cleaned_text = str(keyword_text).strip()
+                if not cleaned_text:
+                    continue
+                operations.append({
+                    "campaignCriterionOperation": {
+                        "create": {
+                            "campaign": campaign_resource,
+                            "negative": True,
+                            "keyword": {
+                                "text": cleaned_text,
+                                "matchType": normalized_match_type
+                            }
+                        }
+                    }
+                })
+        else:
+            ad_group_id_digits = ''.join(ch for ch in str(ad_group_id) if ch.isdigit())
+            if not ad_group_id_digits:
+                return "Error: ad_group_id must contain digits."
+            ad_group_resource = f"customers/{formatted_customer_id}/adGroups/{ad_group_id_digits}"
+
+            for keyword_text in keywords:
+                cleaned_text = str(keyword_text).strip()
+                if not cleaned_text:
+                    continue
+                operations.append({
+                    "adGroupCriterionOperation": {
+                        "create": {
+                            "adGroup": ad_group_resource,
+                            "negative": True,
+                            "keyword": {
+                                "text": cleaned_text,
+                                "matchType": normalized_match_type
+                            }
+                        }
+                    }
+                })
+
+        if not operations:
+            return "Error: no non-empty keyword text values were provided."
+
+        return post_mutate_request(
+            customer_id=customer_id,
+            mutate_operations=operations,
+            validate_only=validate_only,
+            partial_failure=partial_failure,
+            response_content_type="MUTABLE_RESOURCE",
+            login_customer_id=login_customer_id
+        )
+    except Exception as e:
+        return f"Error adding negative keywords: {str(e)}"
+
+@mcp.tool()
+async def remove_criteria(
+    customer_id: str = Field(description="Google Ads customer ID (10 digits, no dashes)."),
+    criterion_resource_names: List[str] = Field(
+        description="Resource names to remove, e.g. customers/{cid}/campaignCriteria/{campaign_id}~{criterion_id}"
+    ),
+    criterion_scope: str = Field(default="campaign", description="Criterion scope: 'campaign' or 'ad_group'."),
+    validate_only: bool = Field(default=False, description="When true, validates operations without applying changes."),
+    partial_failure: bool = Field(default=True, description="When true, valid operations can succeed even if some fail."),
+    login_customer_id: Optional[str] = Field(
+        default=None,
+        description="Optional login customer ID override. Use empty string to disable the login-customer-id header."
+    )
+) -> str:
+    """Remove campaign or ad-group criteria (including negative keyword criteria)."""
+    try:
+        if not criterion_resource_names:
+            return "Error: criterion_resource_names must contain at least one resource name."
+
+        normalized_scope = normalize_enum(criterion_scope, ["CAMPAIGN", "AD_GROUP"], "criterion_scope")
+        operation_key = "campaignCriterionOperation" if normalized_scope == "CAMPAIGN" else "adGroupCriterionOperation"
+
+        operations = []
+        for resource_name in criterion_resource_names:
+            cleaned_name = str(resource_name).strip()
+            if not cleaned_name:
+                continue
+            operations.append({
+                operation_key: {
+                    "remove": cleaned_name
+                }
+            })
+
+        if not operations:
+            return "Error: no valid criterion resource names were provided."
+
+        return post_mutate_request(
+            customer_id=customer_id,
+            mutate_operations=operations,
+            validate_only=validate_only,
+            partial_failure=partial_failure,
+            response_content_type="RESOURCE_NAME_ONLY",
+            login_customer_id=login_customer_id
+        )
+    except Exception as e:
+        return f"Error removing criteria: {str(e)}"
 
 @mcp.tool()
 async def get_ad_creatives(
