@@ -32,8 +32,6 @@ mcp = FastMCP(
 
 # Constants and configuration
 SCOPES = ['https://www.googleapis.com/auth/adwords']
-API_VERSION = "v19"  # Google Ads API version
-
 # Load environment variables
 try:
     from dotenv import load_dotenv
@@ -42,6 +40,9 @@ try:
     logger.info("Environment variables loaded from .env file")
 except ImportError:
     logger.warning("python-dotenv not installed, skipping .env file loading")
+
+# Google Ads API version (allow override via env for future deprecations)
+API_VERSION = os.environ.get("GOOGLE_ADS_API_VERSION", "v23")
 
 # Get credentials from environment variables
 GOOGLE_ADS_CREDENTIALS_PATH = os.environ.get("GOOGLE_ADS_CREDENTIALS_PATH")
